@@ -1,0 +1,29 @@
+version: 1
+applications:
+  - appRoot: ./
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - echo "🔧 验证 Node.js 版本"
+            - node --version
+            - npm --version
+        build:
+          commands:
+            - echo "📦 安装依赖"
+            - npm ci --no-audit --prefer-offline
+            - echo "🏗️  构建 Next.js 应用"
+            - npm run build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - "**/*"
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*
+    env:
+      variables:
+        # Next.js 16 SSR 配置
+        NEXT_TELEMETRY_DISABLED: "1"
+        NODE_OPTIONS: "--max-old-space-size=4096"

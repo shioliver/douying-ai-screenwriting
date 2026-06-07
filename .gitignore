@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +40,26 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# AWS Amplify
+.amplify/
+amplify/mock-data/
+
+# 本地缓存
+.cache/
+.parcel-cache/
+.eslintcache
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 测试覆盖率
+coverage/
+
+# 临时文件
+*.log
+tmp/
+.temp/
