@@ -24,6 +24,7 @@ export function AIFeedbackPanel() {
   const [size, setSize] = useState({ width: 360, height: 480 })
   const [windowSize, setWindowSize] = useState({ width: 1920, height: 1080 })
   const [showSettings, setShowSettings] = useState(false)
+  const [multiSelections, setMultiSelections] = useState<Record<string, string[]>>({})
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -64,16 +65,43 @@ export function AIFeedbackPanel() {
   }, [isExpanded])
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return
+    if (isLoading) return
+    if (currentQuestion?.type === 'multi-choice' && currentQuestion.key) {
+      await handleMultiChoiceSubmit(currentQuestion.key)
+      return
+    }
+    if (!input.trim()) return
     const text = input.trim()
     setInput('')
     await sendToAPIStream(text)
   }
 
-  const handleOptionClick = async (value: string) => {
+  const handleOptionClick = async (msg: { questionKey?: string; fieldType?: string }, value: string) => {
     if (isLoading) return
+
+    if (msg.fieldType === 'multi-choice' && msg.questionKey) {
+      setMultiSelections((prev) => {
+        const current = prev[msg.questionKey!] || []
+        const next = current.includes(value)
+          ? current.filter((item) => item !== value)
+          : [...current, value]
+        return { ...prev, [msg.questionKey!]: next }
+      })
+      return
+    }
+
     setInput('')
     await sendToAPIStream(value)
+  }
+
+  const handleMultiChoiceSubmit = async (questionKey: string) => {
+    const values = multiSelections[questionKey] || []
+    const customText = input.trim()
+    const answer = [...values, customText].filter(Boolean).join('、')
+    if (!answer || isLoading) return
+    setInput('')
+    setMultiSelections((prev) => ({ ...prev, [questionKey]: [] }))
+    await sendToAPIStream(answer)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -186,29 +214,54 @@ export function AIFeedbackPanel() {
             ))}
 
             {/* 关键节点 - 多轮对话问题（带选项）*/}
-            {messages.filter(m => m.type === 'question').map((msg, i) => (
-              <div key={`q-${i}`} className="flex justify-start">
-                <div className="max-w-[90%] space-y-2">
-                  <div className="px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-2xl rounded-bl-md bg-zinc-100 text-zinc-900">
-                    {msg.content}
-                  </div>
-                  {/* 选项按钮 */}
-                  {msg.options && msg.options.length > 0 && (
-                    <div className="flex flex-wrap gap-2 pl-1">
-                      {msg.options.map((opt, j) => (
-                        <button
-                          key={j}
-                          onClick={() => handleOptionClick(opt.value)}
-                          className="px-3 py-1.5 text-xs text-zinc-900 font-medium bg-white border border-zinc-300 rounded-full hover:bg-zinc-900 hover:text-white hover:border-zinc-900 transition-colors cursor-pointer"
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
+            {messages.filter(m => m.type === 'question').map((msg, i) => {
+              const selectedValues = msg.questionKey ? multiSelections[msg.questionKey] || [] : []
+              return (
+                <div key={`q-${i}`} className="flex justify-start">
+                  <div className="max-w-[90%] space-y-2">
+                    <div className="px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap rounded-2xl rounded-bl-md bg-zinc-100 text-zinc-900">
+                      {msg.content}
                     </div>
-                  )}
+                    {msg.whyAsk && (
+                      <div className="pl-1 text-[11px] leading-relaxed text-zinc-500">
+                        为什么问：{msg.whyAsk}
+                      </div>
+                    )}
+                    {msg.allowCustom && (
+                      <div className="pl-1 text-[11px] leading-relaxed text-zinc-500">
+                        支持自定义：{msg.customPlaceholder || msg.placeholder || '你可以直接在输入框输入自己的答案'}
+                      </div>
+                    )}
+                    {/* 选项按钮 */}
+                    {msg.options && msg.options.length > 0 && (
+                      <div className="flex flex-wrap gap-2 pl-1">
+                        {msg.options.map((opt, j) => {
+                          const selected = selectedValues.includes(opt.value)
+                          return (
+                            <button
+                              key={j}
+                              onClick={() => handleOptionClick(msg, opt.value)}
+                              className={`px-3 py-1.5 text-xs font-medium border rounded-full transition-colors cursor-pointer ${selected ? 'bg-zinc-900 text-white border-zinc-900' : 'bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-900 hover:text-white hover:border-zinc-900'}`}
+                            >
+                              {selected ? '✓ ' : ''}{opt.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {msg.fieldType === 'multi-choice' && msg.questionKey && (
+                      <button
+                        onClick={() => handleMultiChoiceSubmit(msg.questionKey!)}
+                        disabled={isLoading || (selectedValues.length === 0 && !input.trim())}
+                        className="ml-1 px-3 py-1.5 text-xs font-medium text-white bg-zinc-900 rounded-full disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        确认选择
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
 
             {/* 关键节点 - 生成步骤 */}
             {(currentStep === 'outline' || outline) && (
@@ -253,7 +306,7 @@ export function AIFeedbackPanel() {
                   isLoading
                     ? 'AI 正在创作中...'
                     : currentQuestion
-                    ? currentQuestion.placeholder || `第 ${(dialogue?.currentIndex || 0) + 1} 轮：${currentQuestion.question}`
+                    ? currentQuestion.customPlaceholder || currentQuestion.placeholder || `第 ${(dialogue?.currentIndex || 0) + 1} 轮：${currentQuestion.question}`
                     : '描述你的创意，Enter 发送，Shift+Enter 换行'
                 }
                 rows={2}
@@ -262,7 +315,7 @@ export function AIFeedbackPanel() {
               />
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || isLoading}
+                disabled={isLoading || (!input.trim() && !(currentQuestion?.type === 'multi-choice' && currentQuestion.key && (multiSelections[currentQuestion.key]?.length || 0) > 0))}
                 className="p-2 bg-zinc-900 text-white rounded-full hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}

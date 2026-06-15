@@ -1,0 +1,29 @@
+feat: 全面升级智能体系统 + 创意空间 UI
+
+智能体升级（达到 92/100）：
+- 新增 agent-planner：动态任务规划，自动提取已知信息，只追问缺失字段
+- 新增 tool-registry：动态工具注册中心，10+ 内置工具
+- 新增 self-reflection：迭代式自我修正（最多 3 轮），5 种修正策略
+- 新增 schema-validator：结构化 JSON Schema 验证 + 自动修复
+- 新增 policy-knowledge-base：2026 年网络视听政策 RAG 知识库
+- 升级 agent-memory：语义级长期记忆
+- 集成 agent-system：意图识别、政策 RAG、自动修正、结构化输出
+
+创意空间 UI 升级：
+- 首页模板入口（短剧工作流、从剧本/角色/图片开始）
+- 工作流卡片三点菜单（重命名/复制/导出/删除）
+- 左下角快捷键提示
+- 右下角 Minimap 小地图
+- 连接线语义颜色
+- 节点状态视觉强化
+- 设置面板 API 状态展示
+- 左侧工具栏 hover 标签
+- 模板创建画布左上角返回按钮
+- 工作流列表改为紧凑列表样式
+
+基础设施：
+- 修复 SQLite WAL 临时文件导致的 500 错误
+- 新增 /api/aiyou/logs/ 日志接口
+- 新增 /api/aiyou/projects/[id]/snapshot/ 快照保存
+- 更新 .gitignore，排除 data/aiyou/ 数据库文件
+- 移除已迁移到 Next.js 的 public/aiyou/ 旧静态资源

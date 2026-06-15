@@ -63,3 +63,18 @@ coverage/
 *.log
 tmp/
 .temp/
+
+# SQLite 数据库文件
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 旧版 AIYOU 静态资源（已迁移到 Next.js）
+public/aiyou/
+
+# 效果图和本地图片素材
+效果图.jpg
+*.jpg
+!public/*.jpg
+!public/**/*.jpg

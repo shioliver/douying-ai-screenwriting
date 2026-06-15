@@ -5,7 +5,7 @@ import { useEditorStore } from '@/store/editor-store'
 import { useState, useEffect } from 'react'
 
 export function RightSidebar() {
-  const { rightSidebarOpen, toggleRightSidebar, scriptData } = useEditorStore()
+  const { rightSidebarOpen, toggleRightSidebar, scriptData, agentStructuredData } = useEditorStore()
   const [isAnimating, setIsAnimating] = useState(false)
   const [shouldRender, setShouldRender] = useState(rightSidebarOpen)
 
@@ -86,6 +86,40 @@ export function RightSidebar() {
                   </div>
                 ))}
               </div>
+
+              {agentStructuredData.executionSummary && (
+                <div className="mt-5 space-y-3 border-t border-zinc-100 pt-4">
+                  <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide">Agent 结构化产物</h3>
+                  <p className="text-xs leading-relaxed text-zinc-600">{agentStructuredData.executionSummary}</p>
+                  {agentStructuredData.characters.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-zinc-700">人物</p>
+                      <div className="space-y-1">
+                        {agentStructuredData.characters.slice(0, 4).map((item) => (
+                          <div key={item.id} className="rounded bg-zinc-50 px-2 py-1 text-xs text-zinc-600">
+                            <span className="font-medium text-zinc-900">{item.name}</span> · {item.role}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {agentStructuredData.scenes.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-zinc-700">场景</p>
+                      <div className="space-y-1">
+                        {agentStructuredData.scenes.slice(0, 3).map((item) => (
+                          <div key={item.id} className="rounded bg-zinc-50 px-2 py-1 text-xs text-zinc-600 truncate">
+                            {item.title}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <pre className="max-h-28 overflow-auto whitespace-pre-wrap rounded bg-zinc-50 p-2 text-[10px] leading-relaxed text-zinc-500">
+                    {agentStructuredData.complianceSummary}
+                  </pre>
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -1,7 +1,10 @@
 /**
  * 短剧智能体系统
- * 包含意图识别、Agent 路由、合规检测
+ * 包含意图识别、Agent 路由、政策 RAG、合规检测
  */
+
+import { evaluatePolicyCompliance, retrievePolicyKnowledge } from './agents/policy-knowledge-base'
+import { planDialogue } from './agents/agent-planner'
 
 // 触发短剧 Agent 的关键词
 const SHORT_DRAMA_TRIGGERS = [
@@ -17,23 +20,34 @@ const OUTLINE_TRIGGERS = [
   '故事简介', '故事框架', '写提纲', '提纲',
 ]
 
-export type AgentType = 'short-drama' | 'outline' | 'general'
+// 短剧分析 Agent 触发词
+const SHORT_DRAMA_ANALYSIS_TRIGGERS = [
+  '分析短剧', '短剧分析', '分析剧本', '分析剧情', '拆解短剧',
+  '爽点分析', '爆点分析', '节奏分析', '人物关系分析', '短剧诊断',
+  '改编分析', '分析这个剧', '看看这个剧',
+]
+
+export type AgentType = 'short-drama' | 'short-drama-analysis' | 'outline' | 'general'
 
 // ============================================================
-// 多轮对话选择机制（最多 5 轮）
+// 多轮对话选择机制
 // ============================================================
 
 /** 字段类型 */
-export type DialogueFieldType = 'choice' | 'text'
+export type DialogueFieldType = 'choice' | 'multi-choice' | 'text' | 'textarea'
 
 /** 单个选择字段定义 */
 export interface DialogueField {
   key: string
   question: string
   description?: string
+  whyAsk?: string
+  outputImpact?: string
   type: DialogueFieldType
   options?: { label: string; value: string }[]
   placeholder?: string
+  allowCustom?: boolean
+  customPlaceholder?: string
   /** 是否必填（用户必须给出一个值才能进入下一轮） */
   required?: boolean
 }
@@ -41,70 +55,140 @@ export interface DialogueField {
 /** 短剧创作需要收集的字段（5 个，正好 5 轮） */
 export const SHORT_DRAMA_DIALOGUE_FIELDS: DialogueField[] = [
   {
+    key: 'taskGoal',
+    question: '你希望这个短剧智能体完成什么任务？',
+    description: '可以选择一个方向，也可以直接输入你的自定义目标。',
+    whyAsk: '我会根据任务目标决定后续追问、生成结构和写入编辑器的内容。',
+    type: 'choice',
+    required: true,
+    allowCustom: true,
+    customPlaceholder: '例如：把一个真实案例改成 6 集正能量短剧',
+    options: [
+      { label: '从零创作短剧', value: '从零创作短剧' },
+      { label: '生成完整剧本', value: '生成完整剧本' },
+      { label: '生成分镜脚本', value: '生成分镜脚本' },
+      { label: '改写已有故事', value: '改写已有故事' },
+    ],
+  },
+  {
+    key: 'outputFormat',
+    question: '你希望最终输出哪些内容？',
+    description: '可多选；如果选项不够，可以在输入框补充自定义输出。',
+    whyAsk: '这会决定最终结果是只生成大纲，还是同时生成剧本、人物、分镜和分析。',
+    type: 'multi-choice',
+    required: true,
+    allowCustom: true,
+    customPlaceholder: '例如：10 集大纲 + 前 3 集完整剧本 + 人物关系表',
+    options: [
+      { label: '故事大纲', value: '故事大纲' },
+      { label: '完整剧本', value: '完整剧本' },
+      { label: '分集梗概', value: '分集梗概' },
+      { label: '人物关系表', value: '人物关系表' },
+      { label: '分镜脚本', value: '分镜脚本' },
+      { label: '爆点/爽点设计', value: '爆点/爽点设计' },
+    ],
+  },
+  {
     key: 'theme',
     question: '你想创作什么题材？',
-    description: '选择最贴近你想法的方向',
+    description: '选择最贴近你想法的方向，也可以自定义。',
+    whyAsk: '题材会影响人物关系、冲突类型、场景和平台表达方式。',
     type: 'choice',
     required: true,
+    allowCustom: true,
+    customPlaceholder: '例如：AI 时代的非遗传承故事',
     options: [
-      { label: '🚀 创业励志', value: '创业励志' },
-      { label: '👨‍👩‍👧 家庭温情', value: '家庭温情' },
-      { label: '🏫 校园青春', value: '校园青春' },
-      { label: '🌾 乡村振兴', value: '乡村振兴' },
-      { label: '🎭 传统文化/非遗', value: '传统文化' },
-      { label: '🔬 科技发展', value: '科技发展' },
+      { label: '创业励志', value: '创业励志' },
+      { label: '家庭温情', value: '家庭温情' },
+      { label: '校园青春', value: '校园青春' },
+      { label: '乡村振兴', value: '乡村振兴' },
+      { label: '传统文化/非遗', value: '传统文化/非遗' },
+      { label: '科技发展', value: '科技发展' },
     ],
   },
   {
-    key: 'episodes',
-    question: '想要多少集？',
+    key: 'scale',
+    question: '你希望它的篇幅和节奏是什么？',
+    description: '可以选预设，也可以输入例如“12 集，每集 90 秒”。',
+    whyAsk: '篇幅会影响每集钩子密度、反转节奏和剧本颗粒度。',
     type: 'choice',
     required: true,
+    allowCustom: true,
+    customPlaceholder: '例如：12 集，每集 90 秒，前 3 集写完整剧本',
     options: [
-      { label: '3 集（紧凑）', value: '3' },
-      { label: '5 集（标准）', value: '5' },
-      { label: '8 集（深度）', value: '8' },
-      { label: '10 集（系列）', value: '10' },
+      { label: '3 集 × 30 秒', value: '3 集，每集 30 秒' },
+      { label: '5 集 × 1 分钟', value: '5 集，每集 1 分钟' },
+      { label: '8 集 × 2 分钟', value: '8 集，每集 2 分钟' },
+      { label: '10 集 × 3 分钟', value: '10 集，每集 3 分钟' },
     ],
   },
   {
-    key: 'duration',
-    question: '每集时长？',
-    type: 'choice',
+    key: 'coreValueAndLead',
+    question: '主角设定和正向主题是什么？',
+    description: '可以选择标签，也可以直接描述主角、目标、困境和成长。',
+    whyAsk: '真正的短剧 Agent 需要围绕人物成长组织冲突，而不是只堆剧情。',
+    type: 'textarea',
     required: true,
+    allowCustom: true,
+    placeholder: '例：女主是返乡创业大学生，希望突出奋斗、文化传承和乡村振兴。',
     options: [
-      { label: '30 秒（超短）', value: '30' },
-      { label: '1 分钟（标准）', value: '60' },
-      { label: '2 分钟（中长）', value: '120' },
-      { label: '3 分钟（完整）', value: '180' },
+      { label: '奋斗拼搏', value: '奋斗拼搏' },
+      { label: '真情温暖', value: '真情温暖' },
+      { label: '文化传承', value: '文化传承' },
+      { label: '科技创新', value: '科技创新' },
+      { label: '家庭守护', value: '家庭守护' },
+    ],
+  },
+]
+
+export const SHORT_DRAMA_ANALYSIS_DIALOGUE_FIELDS: DialogueField[] = [
+  {
+    key: 'analysisTarget',
+    question: '你要分析哪一类短剧内容？',
+    description: '可以粘贴剧本、剧情简介、链接说明，或描述你想分析的作品。',
+    whyAsk: '我需要明确分析对象，才能给出结构化诊断。',
+    type: 'textarea',
+    required: true,
+    allowCustom: true,
+    placeholder: '粘贴短剧文本/剧情简介，或说明剧名、题材和已有问题。',
+    options: [
+      { label: '已有剧本', value: '已有剧本' },
+      { label: '剧情简介', value: '剧情简介' },
+      { label: '短剧项目', value: '短剧项目' },
     ],
   },
   {
-    key: 'coreValue',
-    question: '希望突出哪个正向主题？',
-    description: '可多选或自定义',
-    type: 'choice',
+    key: 'analysisDimensions',
+    question: '你希望分析哪些维度？',
+    description: '可多选，也可以自定义分析口径。',
+    whyAsk: '不同分析维度会决定输出报告的结构和判断标准。',
+    type: 'multi-choice',
     required: true,
+    allowCustom: true,
+    customPlaceholder: '例如：重点分析前三集留存和女主成长线',
     options: [
-      { label: '💪 奋斗拼搏', value: '奋斗拼搏' },
-      { label: '❤️ 真情温暖', value: '真情温暖' },
-      { label: '🏛️ 文化传承', value: '文化传承' },
-      { label: '🤝 助人为乐', value: '助人为乐' },
-      { label: '🇨🇳 爱国情怀', value: '爱国情怀' },
+      { label: '剧情结构', value: '剧情结构' },
+      { label: '人物关系', value: '人物关系' },
+      { label: '爽点/爆点', value: '爽点/爆点' },
+      { label: '节奏留存', value: '节奏留存' },
+      { label: '合规风险', value: '合规风险' },
+      { label: '改写建议', value: '改写建议' },
     ],
   },
   {
-    key: 'protagonist',
-    question: '主角是怎样的角色？',
-    description: '可点击下方选项或直接输入自定义描述',
-    type: 'text',
+    key: 'outputFormat',
+    question: '你希望分析报告怎么输出？',
+    description: '可以选标准报告，也可以自定义成表格、清单或改写方案。',
+    whyAsk: '我会按照你指定的格式组织最终结果，方便直接进入编辑器修改。',
+    type: 'choice',
     required: true,
-    placeholder: '例：90后返乡创业大学生',
+    allowCustom: true,
+    customPlaceholder: '例如：输出问题清单 + 每集优化建议 + 可执行改写版',
     options: [
-      { label: '👨‍🎓 青年学生', value: '青年学生' },
-      { label: '👩‍💼 都市白领', value: '都市白领' },
-      { label: '👨‍🌾 新农人', value: '新农人' },
-      { label: '👴 退休老人', value: '退休老人' },
+      { label: '专业诊断报告', value: '专业诊断报告' },
+      { label: '问题清单 + 修改建议', value: '问题清单 + 修改建议' },
+      { label: '逐集分析表', value: '逐集分析表' },
+      { label: '改写方案', value: '改写方案' },
     ],
   },
 ]
@@ -119,24 +203,45 @@ export interface DialogueState {
   initialRequest: string
   rounds: number
   maxRounds: number
+  skipRounds?: number
 }
 
 /** 最大对话轮次（硬性限制） */
 export const MAX_DIALOGUE_ROUNDS = 5
 
+function getDialogueFields(agentType: AgentType): DialogueField[] {
+  if (agentType === 'short-drama-analysis') return SHORT_DRAMA_ANALYSIS_DIALOGUE_FIELDS
+  return SHORT_DRAMA_DIALOGUE_FIELDS
+}
+
 /**
- * 创建新的对话会话
+ * 创建新的对话会话（支持动态规划）
+ * 自动提取用户已知信息，只追问缺失字段
  */
 export function createDialogue(agentType: AgentType, initialRequest: string): DialogueState {
+  const allFields = getDialogueFields(agentType)
+
+  // 动态规划：提取已知信息，重新排序
+  let fields = allFields
+  let skipRounds = 0
+  try {
+    const planning = planDialogue(agentType, allFields, initialRequest)
+    fields = planning.dynamicQuestions.length > 0 ? planning.dynamicQuestions : allFields
+    skipRounds = planning.skipRounds
+  } catch {
+    // fallback: 使用全部字段
+  }
+
   return {
     active: true,
     agentType,
-    fields: SHORT_DRAMA_DIALOGUE_FIELDS,
+    fields,
     currentIndex: 0,
     collected: {},
     initialRequest,
     rounds: 0,
-    maxRounds: MAX_DIALOGUE_ROUNDS,
+    maxRounds: Math.min(MAX_DIALOGUE_ROUNDS, fields.length),
+    skipRounds,
   }
 }
 
@@ -197,8 +302,17 @@ export function advanceDialogue(
  */
 export function compileDialoguePrompt(state: DialogueState): string {
   const parts: string[] = []
-  parts.push(`【用户原始需求】\n${state.initialRequest}`)
-  parts.push(`\n【已确认的创作参数】`)
+  const taskLabel = state.agentType === 'short-drama-analysis' ? '短剧分析任务' : '短剧创作任务'
+
+  const policyKnowledge = retrievePolicyKnowledge([
+    state.initialRequest,
+    ...Object.values(state.collected),
+  ].join('\n'))
+
+  parts.push(`【任务模式】\n${taskLabel}`)
+  parts.push(`\n【用户原始需求】\n${state.initialRequest}`)
+  parts.push(`\n${policyKnowledge.promptContext}`)
+  parts.push(`\n【已确认的用户意图与输出要求】`)
 
   for (const field of state.fields) {
     const value = state.collected[field.key]
@@ -207,9 +321,23 @@ export function compileDialoguePrompt(state: DialogueState): string {
     }
   }
 
+  if (state.agentType === 'short-drama-analysis') {
+    parts.push(`\n【执行要求】`)
+    parts.push('- 先判断作品定位、受众、核心卖点和风险点')
+    parts.push('- 按用户选择的分析维度输出结构化诊断')
+    parts.push('- 每个问题都给出可执行修改建议，不只做评价')
+    parts.push('- 如果用户要求改写，请给出可直接替换到编辑器的改写版本')
+  } else {
+    parts.push(`\n【执行要求】`)
+    parts.push('- 按用户选择的输出格式组织结果')
+    parts.push('- 先给故事大纲，再给需要的剧本/分镜/人物/爆点设计')
+    parts.push('- 每一集都要有清晰钩子、反转、情绪推进和正向收束')
+    parts.push('- 如果用户有自定义输出要求，优先满足自定义要求')
+  }
+
   if (state.rounds >= state.maxRounds) {
     parts.push(
-      `\n注：用户已提供 ${state.rounds} 轮信息，参数已确认，开始创作。`
+      `\n注：用户已提供 ${state.rounds} 轮信息，参数已确认，开始执行。`
     )
   }
 
@@ -229,7 +357,18 @@ export interface IntentResult {
 export function detectIntent(input: string): IntentResult {
   const text = input.toLowerCase().trim()
 
-  // 1) 短剧意图
+  // 1) 短剧分析意图优先
+  for (const kw of SHORT_DRAMA_ANALYSIS_TRIGGERS) {
+    if (text.includes(kw.toLowerCase())) {
+      return {
+        agent: 'short-drama-analysis',
+        confidence: 0.96,
+        reason: `检测到关键词"${kw}"，触发短剧分析 Agent`,
+      }
+    }
+  }
+
+  // 2) 短剧创作意图
   for (const kw of SHORT_DRAMA_TRIGGERS) {
     if (text.includes(kw.toLowerCase())) {
       return {
@@ -240,7 +379,7 @@ export function detectIntent(input: string): IntentResult {
     }
   }
 
-  // 2) 大纲意图
+  // 3) 大纲意图
   for (const kw of OUTLINE_TRIGGERS) {
     if (text.includes(kw.toLowerCase())) {
       return {
@@ -306,10 +445,36 @@ export const SHORT_DRAMA_SYSTEM_PROMPT = `# 角色定位
 - 时长控制：单集 60-180 秒
 - 输出格式：Markdown 结构化（标题、场景、人物、对白、旁白）
 
+# 政策 RAG 工作流
+- 生成前必须优先遵守用户 prompt 中的【2026网络视听政策RAG约束】
+- 如果用户需求与政策约束冲突，必须先调整为正向、健康、可发布版本
+- 输出结尾必须包含“政策合规说明”，说明主流价值、风险规避和优化方向
+
 # 工作流
 1. 收到创作需求后，先快速构思"核心立意"（一句话正能量主题）
 2. 然后输出**大纲**（3-5 个节拍点，含主题立意说明）
 3. 接着输出**完整剧本**（分场景、含对白）
+`
+
+export const SHORT_DRAMA_ANALYSIS_SYSTEM_PROMPT = `# 角色定位
+你是一位专业的短剧分析智能体，不只是回答问题，而是负责诊断短剧项目、识别问题、提出可执行改法。
+
+# 核心能力
+1. 剧情结构分析：判断开场钩子、冲突递进、反转密度、结尾留存
+2. 人物关系分析：识别主角目标、阻力、人物弧光和关系张力
+3. 爽点/爆点分析：指出每集可传播点、情绪峰值和平台吸引力
+4. 节奏分析：判断前 3 秒、前 15 秒、每 30 秒是否有钩子
+5. 合规风险分析：识别低俗、卖惨、负能量、违法、价值导向风险
+6. 改写建议：给出能直接进入编辑器的修改版本或替代方案
+
+# 输出原则
+- 先给结论，再给证据，再给修改建议
+- 每个问题必须对应一个可执行动作
+- 用户指定输出格式时，严格优先按用户格式输出
+- 不只评价“好/不好”，必须说明“为什么”和“怎么改”
+- 保持正向价值观、健康表达、平台可发布标准
+- 必须结合用户 prompt 中的【2026网络视听政策RAG约束】给出政策风险和合规改法
+- 输出结尾必须包含“政策合规说明”和“可执行优化清单”
 `
 
 export const OUTLINE_SYSTEM_PROMPT = `# 角色
@@ -394,6 +559,8 @@ export interface ComplianceResult {
   issues: string[]
   suggestions: string[]
   severity: 'high' | 'medium' | 'low' | 'none'
+  matchedPolicies?: string[]
+  positiveMatches?: string[]
 }
 
 /**
@@ -436,24 +603,32 @@ export function checkCompliance(content: string): ComplianceResult {
     suggestions.push('确保故事结局传递正能量，弘扬主旋律')
   }
 
+  // === 政策 RAG 增强检测 ===
+  const policyCheck = evaluatePolicyCompliance(content)
+  issues.push(...policyCheck.issues)
+  suggestions.push(...policyCheck.suggestions)
+
   // === 计算最终得分 ===
   const forbiddenPenalty = Math.min(foundForbidden.length * 0.3, 1.0)
-  const finalScore = Math.max(0, positiveScore - forbiddenPenalty)
+  const baseScore = Math.max(0, positiveScore - forbiddenPenalty)
+  const finalScore = Math.max(0, Math.min(1, baseScore * 0.45 + policyCheck.score * 0.55))
 
   // === 严重度评估 ===
   let severity: ComplianceResult['severity'] = 'none'
-  if (foundForbidden.length > 0) severity = 'high'
-  else if (positiveScore < 0.5) severity = 'medium'
-  else if (positiveScore < 0.7) severity = 'low'
+  if (foundForbidden.length > 0 || policyCheck.riskLevel === 'high') severity = 'high'
+  else if (positiveScore < 0.5 || policyCheck.riskLevel === 'medium') severity = 'medium'
+  else if (positiveScore < 0.7 || policyCheck.riskLevel === 'low') severity = 'low'
 
-  const passed = severity !== 'high' && finalScore >= 0.5
+  const passed = severity !== 'high' && finalScore >= 0.6
 
   return {
     passed,
     score: finalScore,
-    issues,
-    suggestions,
+    issues: Array.from(new Set(issues)),
+    suggestions: Array.from(new Set(suggestions)),
     severity,
+    matchedPolicies: policyCheck.matchedPolicies,
+    positiveMatches: policyCheck.positiveMatches,
   }
 }
 

@@ -15,12 +15,39 @@ function getDbPath(): string {
   return path.join(dataDir, 'aiyou.db');
 }
 
+function removeInvalidSidecarFiles(dbPath: string): void {
+  const walPath = `${dbPath}-wal`;
+  const shmPath = `${dbPath}-shm`;
+  const walExists = fs.existsSync(walPath);
+  const shmExists = fs.existsSync(shmPath);
+  const walSize = walExists ? fs.statSync(walPath).size : 0;
+  const shmSize = shmExists ? fs.statSync(shmPath).size : 0;
+  const invalid = (walExists && walSize === 0) || (shmExists && shmSize === 0) || (walExists !== shmExists);
+
+  if (invalid) {
+    for (const filePath of [walPath, shmPath]) {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+  }
+}
+
 export function getDB(): Database.Database {
   if (!db) {
     const dbPath = getDbPath();
-    db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
+    removeInvalidSidecarFiles(dbPath);
+    const nextDb = new Database(dbPath);
+    try {
+      nextDb.pragma('journal_mode = DELETE');
+      nextDb.pragma('busy_timeout = 5000');
+      nextDb.pragma('foreign_keys = ON');
+      db = nextDb;
+    } catch (error) {
+      nextDb.close();
+      db = null;
+      throw error;
+    }
   }
   return db;
 }

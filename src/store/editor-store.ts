@@ -7,6 +7,15 @@ interface ScriptTag {
   count: number
 }
 
+interface AgentStructuredData {
+  characters: Array<{ id: string; name: string; description: string; role: string }>
+  scenes: Array<{ id: string; title: string; location: string; time: string; description: string }>
+  locations: Array<{ id: string; name: string; description: string }>
+  shots: Array<{ id: string; sceneTitle: string; shotType: string; camera: string; description: string }>
+  executionSummary: string
+  complianceSummary: string
+}
+
 interface ScriptData {
   sceneCount: number
   characterCount: number
@@ -24,9 +33,11 @@ interface EditorState {
   rightSidebarOpen: boolean
   aiPanelOpen: boolean
   scriptData: ScriptData
+  agentStructuredData: AgentStructuredData
   setActiveTag: (tag: string) => void
   updateCounts: (words: number, chars: number) => void
   updateScriptData: (data: Partial<ScriptData>) => void
+  setAgentStructuredData: (data: AgentStructuredData) => void
   toggleLeftSidebar: () => void
   toggleRightSidebar: () => void
   toggleAIPanel: () => void
@@ -54,9 +65,27 @@ export const useEditorStore = create<EditorState>((set) => ({
     shotCount: 0,
     characterRelationCount: 0,
   },
+  agentStructuredData: {
+    characters: [],
+    scenes: [],
+    locations: [],
+    shots: [],
+    executionSummary: '',
+    complianceSummary: '',
+  },
   setActiveTag: (tag) => set({ activeTag: tag }),
   updateCounts: (words, chars) => set({ wordCount: words, characterCount: chars }),
   updateScriptData: (data) => set((state) => ({ scriptData: { ...state.scriptData, ...data } })),
+  setAgentStructuredData: (data) => set({
+    agentStructuredData: data,
+    scriptData: {
+      sceneCount: data.scenes.length,
+      characterCount: data.characters.length,
+      locationCount: data.locations.length,
+      shotCount: data.shots.length,
+      characterRelationCount: Math.max(0, data.characters.length - 1),
+    },
+  }),
   toggleLeftSidebar: () => set((state) => ({ leftSidebarOpen: !state.leftSidebarOpen })),
   toggleRightSidebar: () => set((state) => ({ rightSidebarOpen: !state.rightSidebarOpen })),
   toggleAIPanel: () => set((state) => ({ aiPanelOpen: !state.aiPanelOpen })),

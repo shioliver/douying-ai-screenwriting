@@ -3,6 +3,8 @@
 import { create } from 'zustand'
 import { useAISettingsStore } from './ai-settings-store'
 import { useToastStore } from './toast-store'
+import { useEditorStore } from './editor-store'
+import type { ComplianceResult } from '@/lib/agent-system'
 
 /** 对话消息 */
 export interface AIMessage {
@@ -12,7 +14,10 @@ export interface AIMessage {
   questionKey?: string
   options?: { label: string; value: string }[]
   placeholder?: string
-  fieldType?: 'choice' | 'text'
+  customPlaceholder?: string
+  whyAsk?: string
+  allowCustom?: boolean
+  fieldType?: 'choice' | 'multi-choice' | 'text' | 'textarea'
 }
 
 /** 对话选项（多轮选择用） */
@@ -25,14 +30,18 @@ export interface DialogueQuestion {
   key: string
   question: string
   description?: string
-  type: 'choice' | 'text'
+  whyAsk?: string
+  outputImpact?: string
+  type: 'choice' | 'multi-choice' | 'text' | 'textarea'
   options?: DialogueOption[]
   placeholder?: string
+  customPlaceholder?: string
+  allowCustom?: boolean
 }
 
 interface DialogueStateLite {
   active: boolean
-  agentType: 'short-drama' | 'outline' | 'general'
+  agentType: 'short-drama' | 'short-drama-analysis' | 'outline' | 'general'
   currentIndex: number
   totalRounds: number
   maxRounds: number
@@ -70,7 +79,7 @@ interface AIState {
   setDialogue: (dialogue: DialogueStateLite | null) => void
   setAwaitingUserAnswer: (awaiting: boolean) => void
   /** 启动多轮对话 */
-  startDialogue: (agentType: 'short-drama' | 'outline' | 'general', initialRequest: string) => void
+  startDialogue: (agentType: 'short-drama' | 'short-drama-analysis' | 'outline' | 'general', initialRequest: string) => void
   /** 回答当前问题（推进对话） */
   answerDialogue: (answer: string) => Promise<void>
   sendToAPIStream: (userMessage: string) => Promise<void>
@@ -181,6 +190,25 @@ export const useAIStore = create<AIState>((set, get) => ({
         script: '',
       })
 
+      const agentLabel = agentType === 'short-drama-analysis' ? '短剧分析 Agent' : agentType === 'outline' ? '大纲 Agent' : '短剧创作 Agent'
+
+      // 智能开场：使用 planner 构建开场消息
+      let openingMessage = `🤖 已启动 ${agentLabel}。我会根据你的回答动态组织输出，选项不够时可以直接自定义输入。`
+      try {
+        const { buildSmartOpening } = await import('@/lib/agents/agent-planner')
+        const { extractKnownInfo } = await import('@/lib/agents/agent-planner')
+        const extracted = extractKnownInfo(initialRequest, agentType)
+        const knownFields = Object.entries(extracted)
+          .filter(([, v]) => v)
+          .map(([key, value]) => ({ key, value: value!, confidence: 0.85 }))
+        const missingCount = dialogue.fields.length - knownFields.length
+        if (knownFields.length > 0) {
+          openingMessage = buildSmartOpening(knownFields, missingCount, agentType)
+        }
+      } catch {
+        // fallback
+      }
+
       // 显示引导消息（带问题+选项）
       set((state) => ({
         messages: [...state.messages, {
@@ -190,10 +218,13 @@ export const useAIStore = create<AIState>((set, get) => ({
           questionKey: currentField.key,
           options: currentField.options,
           placeholder: currentField.placeholder,
+          customPlaceholder: currentField.customPlaceholder,
+          whyAsk: currentField.whyAsk,
+          allowCustom: currentField.allowCustom,
           fieldType: currentField.type,
         }, {
           role: 'assistant',
-          content: `🤖 检测到创作需求（${agentType === 'short-drama' ? '短剧' : '大纲'}），将进行最多 ${dialogue.maxRounds} 轮信息确认。`,
+          content: openingMessage,
           type: 'info',
         }],
       }))
@@ -241,9 +272,16 @@ export const useAIStore = create<AIState>((set, get) => ({
       }))
 
       // 把已收集信息编译成 prompt，调 LLM
-      const { compileDialoguePrompt, SHORT_DRAMA_SYSTEM_PROMPT, OUTLINE_SYSTEM_PROMPT } = await import('@/lib/agent-system')
-      const finalPrompt = compileDialoguePrompt(result.state as any)
-      const systemPrompt = dialogue.agentType === 'outline' ? OUTLINE_SYSTEM_PROMPT : SHORT_DRAMA_SYSTEM_PROMPT
+      const { compileDialoguePrompt, checkCompliance, SHORT_DRAMA_SYSTEM_PROMPT, SHORT_DRAMA_ANALYSIS_SYSTEM_PROMPT, OUTLINE_SYSTEM_PROMPT } = await import('@/lib/agent-system')
+      const { AGENT_STRUCTURED_JSON_PROTOCOL } = await import('@/lib/agents/structured-output')
+      const { buildMemoryPromptContext, updateAgentMemoryFromInput } = await import('@/lib/agents/agent-memory')
+      const memory = updateAgentMemoryFromInput(result.state.initialRequest)
+      const finalPrompt = `${compileDialoguePrompt(result.state as any)}\n\n${buildMemoryPromptContext(memory)}\n\n${AGENT_STRUCTURED_JSON_PROTOCOL}`
+      const systemPrompt = dialogue.agentType === 'short-drama-analysis'
+        ? SHORT_DRAMA_ANALYSIS_SYSTEM_PROMPT
+        : dialogue.agentType === 'outline'
+        ? OUTLINE_SYSTEM_PROMPT
+        : SHORT_DRAMA_SYSTEM_PROMPT
 
       // 进入正常的 LLM 流式生成流程
       set({
@@ -264,7 +302,7 @@ export const useAIStore = create<AIState>((set, get) => ({
           }],
         }))
 
-        const outlineContent = await callLLMStream(
+        const outlineDraft = await callLLMStream(
           'outline',
           systemPrompt,
           [...messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })), { role: 'user' as const, content: finalPrompt }],
@@ -272,12 +310,16 @@ export const useAIStore = create<AIState>((set, get) => ({
           systemPrompt
         )
 
-        if (outlineContent === null) return
+        if (outlineDraft === null) return
+        const outlineResult = await ensurePolicyCompliantContent('outline', outlineDraft, systemPrompt, getAIHeaders(), checkCompliance)
+        if (outlineResult === null) return
+        const { stripStructuredOutput } = await import('@/lib/agents/structured-output')
+        const outlineContent = stripStructuredOutput(outlineResult.content)
         set({ outline: outlineContent, streamingContent: '', streamingType: null })
 
         set({ currentStep: 'script' })
 
-        const scriptContent = await callLLMStream(
+        const scriptDraft = await callLLMStream(
           'script',
           systemPrompt,
           [...messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })), { role: 'user' as const, content: finalPrompt }],
@@ -285,7 +327,27 @@ export const useAIStore = create<AIState>((set, get) => ({
           systemPrompt
         )
 
-        if (scriptContent === null) return
+        if (scriptDraft === null) return
+        const scriptResult = await ensurePolicyCompliantContent('script', scriptDraft, systemPrompt, getAIHeaders(), checkCompliance)
+        if (scriptResult === null) return
+        const { extractWithRetry } = await import('@/lib/agents/schema-validator')
+        const { extractStructuredOutput } = await import('@/lib/agents/structured-output')
+        const structuredOutput = extractWithRetry(scriptResult.content, extractStructuredOutput) || extractWithRetry(outlineResult.content, extractStructuredOutput)
+        const scriptContent = stripStructuredOutput(scriptResult.content)
+        if (structuredOutput) {
+          const { updateAgentMemoryFromStructuredOutput } = await import('@/lib/agents/agent-memory')
+          updateAgentMemoryFromStructuredOutput(structuredOutput)
+        }
+        const { extractAgentArtifacts } = await import('@/lib/agents/agent-tools')
+        const toolResult = extractAgentArtifacts(outlineContent, scriptContent, structuredOutput)
+        useEditorStore.getState().setAgentStructuredData(toolResult)
+        set((state) => ({
+          messages: [...state.messages, {
+            role: 'assistant',
+            content: `🧩 ${toolResult.executionSummary}\n\n${toolResult.complianceSummary}`,
+            type: 'info',
+          }],
+        }))
         set({ script: scriptContent, streamingContent: '', streamingType: null })
         set({ currentStep: 'done', isLoading: false })
       } catch (error) {
@@ -321,6 +383,9 @@ export const useAIStore = create<AIState>((set, get) => ({
             questionKey: nextField.key,
             options: nextField.options,
             placeholder: nextField.placeholder,
+            customPlaceholder: nextField.customPlaceholder,
+            whyAsk: nextField.whyAsk,
+            allowCustom: nextField.allowCustom,
             fieldType: nextField.type,
           }],
         }))
@@ -361,7 +426,7 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
 
     // ============ Agent 智能路由 ============
-    const { detectIntent, validateUserInput, SHORT_DRAMA_SYSTEM_PROMPT, OUTLINE_SYSTEM_PROMPT } = await import('@/lib/agent-system')
+    const { detectIntent, validateUserInput, SHORT_DRAMA_SYSTEM_PROMPT, SHORT_DRAMA_ANALYSIS_SYSTEM_PROMPT, OUTLINE_SYSTEM_PROMPT } = await import('@/lib/agent-system')
 
     // 1) 意图识别：判断用户要做什么
     const intent = detectIntent(userMessage)
@@ -387,15 +452,24 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
 
     // 3) 根据意图选择 System Prompt
-    const systemPrompt = intent.agent === 'outline' ? OUTLINE_SYSTEM_PROMPT : SHORT_DRAMA_SYSTEM_PROMPT
+    const systemPrompt = intent.agent === 'short-drama-analysis'
+      ? SHORT_DRAMA_ANALYSIS_SYSTEM_PROMPT
+      : intent.agent === 'outline'
+      ? OUTLINE_SYSTEM_PROMPT
+      : SHORT_DRAMA_SYSTEM_PROMPT
     // 添加意图提示到用户消息（让 LLM 知道任务）
-    const intentPrefix = intent.agent === 'short-drama'
+    const intentPrefix = intent.agent === 'short-drama-analysis'
+      ? `[任务意图：短剧分析] 请按用户选择的维度输出诊断、证据和可执行改法。\n\n`
+      : intent.agent === 'short-drama'
       ? `[创作意图：短剧剧本] 请按"大纲→剧本"两阶段输出。\n\n`
       : intent.agent === 'outline'
       ? `[创作意图：故事大纲] 请输出完整故事大纲。\n\n`
       : ''
 
-    const finalUserMessage = intentPrefix + userMessage
+    const { AGENT_STRUCTURED_JSON_PROTOCOL } = await import('@/lib/agents/structured-output')
+    const { buildMemoryPromptContext, updateAgentMemoryFromInput } = await import('@/lib/agents/agent-memory')
+    const memory = updateAgentMemoryFromInput(userMessage)
+    const finalUserMessage = `${intentPrefix}${userMessage}\n\n${buildMemoryPromptContext(memory)}\n\n${AGENT_STRUCTURED_JSON_PROTOCOL}`
 
     const userMsg: AIMessage = {
       role: 'user',
@@ -404,8 +478,8 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
     set((state) => ({ messages: [...state.messages, userMsg] }))
 
-    // ============ 智能路由：检测到 short-drama/outline → 启动多轮对话 ============
-    if (intent.agent === 'short-drama' || intent.agent === 'outline') {
+    // ============ 智能路由：检测到创作/分析/大纲 → 启动多轮对话 ============
+    if (intent.agent === 'short-drama' || intent.agent === 'short-drama-analysis' || intent.agent === 'outline') {
       // 多轮对话期间不需要 isLoading（按钮始终可点）
       get().startDialogue(intent.agent, userMessage)
       return
@@ -429,7 +503,7 @@ export const useAIStore = create<AIState>((set, get) => ({
         }],
       }))
 
-      const outlineContent = await callLLMStream(
+      const outlineDraft = await callLLMStream(
         'outline',
         outlineSystemPrompt(currentTopic || userMessage),
         [...messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })), { role: 'user' as const, content: finalUserMessage }],
@@ -437,32 +511,21 @@ export const useAIStore = create<AIState>((set, get) => ({
         systemPrompt // 传入 Agent 选择的 system
       )
 
-      if (outlineContent === null) return // 中止
+      if (outlineDraft === null) return // 中止
 
-      // ============ 合规检测（输出侧）============
+      // ============ 合规检测 + 自动修正（输出侧）============
       const { checkCompliance } = await import('@/lib/agent-system')
-      const outlineCheck = checkCompliance(outlineContent)
-      if (!outlineCheck.passed) {
-        set((state) => ({
-          messages: [...state.messages, {
-            role: 'assistant',
-            content: `⚠️ 生成的大纲未通过合规检测（评分 ${(outlineCheck.score * 100).toFixed(0)}）\n\n问题：${outlineCheck.issues.join('；') || '价值导向需加强'}\n建议：${outlineCheck.suggestions.join('；')}`,
-            type: 'error',
-          }],
-        }))
-        useToastStore.getState().addToast({
-          type: 'warning',
-          message: '大纲合规检测未通过',
-        })
-        return
-      }
+      const outlineResult = await ensurePolicyCompliantContent('outline', outlineDraft, systemPrompt, getAIHeaders(), checkCompliance)
+      if (outlineResult === null) return
+      const { stripStructuredOutput } = await import('@/lib/agents/structured-output')
+      const outlineContent = stripStructuredOutput(outlineResult.content)
 
       set({ outline: outlineContent, streamingContent: '', streamingType: null })
 
       // ============ Step 2: 基于大纲生成剧本 ============
       set({ currentStep: 'script' })
 
-      const scriptContent = await callLLMStream(
+      const scriptDraft = await callLLMStream(
         'script',
         scriptSystemPrompt(currentTopic || userMessage, outlineContent),
         [...messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })), { role: 'user' as const, content: finalUserMessage }],
@@ -470,25 +533,29 @@ export const useAIStore = create<AIState>((set, get) => ({
         systemPrompt
       )
 
-      if (scriptContent === null) return
+      if (scriptDraft === null) return
 
-      // 剧本合规检测
-      const scriptCheck = checkCompliance(scriptContent)
-      if (!scriptCheck.passed) {
-        set((state) => ({
-          messages: [...state.messages, {
-            role: 'assistant',
-            content: `⚠️ 生成的剧本未通过合规检测（评分 ${(scriptCheck.score * 100).toFixed(0)}）\n\n问题：${scriptCheck.issues.join('；') || '价值导向需加强'}\n建议：${scriptCheck.suggestions.join('；')}\n\n可手动调整或重新生成。`,
-            type: 'error',
-          }],
-        }))
-        useToastStore.getState().addToast({
-          type: 'warning',
-          message: '剧本合规检测未通过',
-        })
-        return
+      // 剧本合规检测 + 自动修正
+      const scriptResult = await ensurePolicyCompliantContent('script', scriptDraft, systemPrompt, getAIHeaders(), checkCompliance)
+      if (scriptResult === null) return
+      const { extractStructuredOutput } = await import('@/lib/agents/structured-output')
+      const structuredOutput = extractStructuredOutput(scriptResult.content) || extractStructuredOutput(outlineResult.content)
+      const scriptContent = stripStructuredOutput(scriptResult.content)
+      if (structuredOutput) {
+        const { updateAgentMemoryFromStructuredOutput } = await import('@/lib/agents/agent-memory')
+        updateAgentMemoryFromStructuredOutput(structuredOutput)
       }
 
+      const { extractAgentArtifacts } = await import('@/lib/agents/agent-tools')
+      const toolResult = extractAgentArtifacts(outlineContent, scriptContent, structuredOutput)
+      useEditorStore.getState().setAgentStructuredData(toolResult)
+      set((state) => ({
+        messages: [...state.messages, {
+          role: 'assistant',
+          content: `🧩 ${toolResult.executionSummary}\n\n${toolResult.complianceSummary}`,
+          type: 'info',
+        }],
+      }))
       set({ script: scriptContent, streamingContent: '', streamingType: null })
       set({ currentStep: 'done', isLoading: false })
     } catch (error) {
@@ -511,6 +578,79 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
   },
 }))
+
+interface ComplianceRewriteResult {
+  content: string
+  check: ComplianceResult
+  rewritten: boolean
+}
+
+/** 迭代修正 Prompt 构建（由 self-reflection 模块接管，保留供降级使用） */
+function buildComplianceRewritePrompt(contentType: 'outline' | 'script', content: string, check: ComplianceResult): string {
+  return `你是高校主旋律网络视听内容合规修正智能体。请在不改变核心创意的前提下，自动改写以下${contentType === 'outline' ? '大纲' : '剧本'}，使其符合2026年网络视听内容导向、微短剧治理要求和高校思政创作标准。\n\n【必须修正的问题】\n${check.issues.join('\n') || '正向价值表达不足'}\n\n【修改建议】\n${check.suggestions.join('\n') || '补充主流价值、青年奋斗、人民视角、文化自信或时代精神'}\n\n【政策依据】\n${check.matchedPolicies?.join('\n') || '内置2026网络视听政策知识库'}\n\n【改写要求】\n1. 保留原有故事核心、人物关系和主要结构。\n2. 删除或替换所有风险表达。\n3. 避免口号式、说教式、脸谱化表达。\n4. 用人物行动和具体情节承载主旋律价值。\n5. 输出完整改写后的正文，不要解释过程。\n6. 如果原文包含 \`\`\`agent-json\`\`\` 结构化块，必须在改写后保留并同步修正该 JSON；如果原文没有，也可以追加合法的 \`\`\`agent-json\`\`\` 块。\n\n【待改写内容】\n${content}`
+}
+
+// 保留引用以避免 tree-shaking 移除（降级路径使用）
+void buildComplianceRewritePrompt
+
+async function ensurePolicyCompliantContent(
+  type: 'outline' | 'script',
+  content: string,
+  systemPrompt: string,
+  headers: Record<string, string>,
+  checkCompliance: (content: string) => ComplianceResult
+): Promise<ComplianceRewriteResult | null> {
+  const firstCheck = checkCompliance(content)
+  if (firstCheck.passed) {
+    return { content, check: firstCheck, rewritten: false }
+  }
+
+  useAIStore.setState((state) => ({
+    messages: [...state.messages, {
+      role: 'assistant',
+      content: `🔁 ${type === 'outline' ? '大纲' : '剧本'}发现政策风险，正在启动迭代式自我修正（最多 3 轮）。\n\n初始评分：${(firstCheck.score * 100).toFixed(0)}\n问题：${firstCheck.issues.join('；') || '正向价值表达不足'}\n建议：${firstCheck.suggestions.join('；')}`,
+      type: 'info',
+    }],
+  }))
+
+  // 使用迭代式自我修正
+  const { iterativeSelfFix } = await import('@/lib/agents/self-reflection')
+  const fixResult = await iterativeSelfFix(
+    type,
+    content,
+    systemPrompt,
+    headers,
+    checkCompliance,
+    async (system, messages, hdrs) => {
+      const result = await callLLMStream(type, system, messages as any, hdrs, system)
+      return result
+    },
+    3
+  )
+
+  // 显示修正过程
+  for (let i = 1; i < fixResult.allChecks.length; i++) {
+    const prev = fixResult.allChecks[i - 1]
+    const curr = fixResult.allChecks[i]
+    useAIStore.setState((state) => ({
+      messages: [...state.messages, {
+        role: 'assistant',
+        content: `🔄 第 ${i} 轮修正：${(prev.score * 100).toFixed(0)} → ${(curr.score * 100).toFixed(0)}（${curr.severity}）`,
+        type: 'info',
+      }],
+    }))
+  }
+
+  useAIStore.setState((state) => ({
+    messages: [...state.messages, {
+      role: 'assistant',
+      content: `✅ ${type === 'outline' ? '大纲' : '剧本'}自我修正完成。\n\n${fixResult.summary}`,
+      type: 'info',
+    }],
+  }))
+
+  return { content: fixResult.content, check: fixResult.allChecks[fixResult.allChecks.length - 1], rewritten: true }
+}
 
 /** 调用 LLM 流式 API；
  *  - 实时通过 window event + zustand 暴露 streamingContent

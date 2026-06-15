@@ -769,8 +769,7 @@ export default function HomePage() {
           <div className="flex-1 flex flex-col items-center justify-center px-8">
             <div className="mb-8">
               <h1 className="text-2xl font-bold text-zinc-900 flex items-center gap-2">
-                <span className="inline-block w-6 h-6 bg-gradient-to-br from-green-500 to-red-500 rounded-sm"></span>
-                抖影
+                <img src="/logo.png" alt="抖影 AI" className="h-10 w-auto" />
               </h1>
             </div>
 
